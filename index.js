@@ -1,5 +1,5 @@
-// Backend Node.js + Express + Ethers.js
-// ------------------------------
+// Backend Node.js + Express + Ethers.js (CommonJS)
+
 // INSTALLA:
 // npm install express cors ethers axios dotenv
 // CREA .env con:
@@ -11,13 +11,9 @@
 const express = require("express");
 const axios = require("axios");
 const cors = require("cors");
-require("dotenv").config();
+const dotenv = require("dotenv");
 const { ethers } = require("ethers");
 
-import cors from "cors";
-import axios from "axios";
-import { ethers } from "ethers";
-import dotenv from "dotenv";
 dotenv.config();
 
 const app = express();
@@ -61,16 +57,23 @@ app.post("/api/scan", async (req, res) => {
           sourceVerified = true;
         }
       }
-    } catch (e) {}
+    } catch (e) {
+      console.error("Errore Etherscan:", e.message);
+    }
 
     // 3) Controlli principali
     const checks = [];
 
     // CONTROLLA FUNZIONI SOSPETTE
     const suspicious = ["mint", "setFee", "blacklist", "pause", "owner", "transferOwnership"];
-    let foundSuspicious = suspicious.filter((s) => bytecode.toLowerCase().includes(s.toLowerCase()));
+    const foundSuspicious = suspicious.filter((s) => bytecode.toLowerCase().includes(s.toLowerCase()));
 
-    checks.push({ title: "Funzioni sospette", status: foundSuspicious.length ? "bad" : "ok", description: "Ricerca nel bytecode", value: foundSuspicious.join(", ") || "None" });
+    checks.push({
+      title: "Funzioni sospette",
+      status: foundSuspicious.length ? "bad" : "ok",
+      description: "Ricerca nel bytecode",
+      value: foundSuspicious.join(", ") || "None"
+    });
 
     // 4) SCORE
     let score = 80;
@@ -99,4 +102,3 @@ app.post("/api/scan", async (req, res) => {
 });
 
 app.listen(3001, () => console.log("Backend attivo su http://localhost:3001"));
-
