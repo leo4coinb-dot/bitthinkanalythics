@@ -8,7 +8,12 @@
 // RPC_POLYGON=https://polygon-rpc.com
 // ETHERSCAN_KEY=xxxxx
 
-import express from "express";
+const express = require("express");
+const axios = require("axios");
+const cors = require("cors");
+require("dotenv").config();
+const { ethers } = require("ethers");
+
 import cors from "cors";
 import axios from "axios";
 import { ethers } from "ethers";
@@ -94,3 +99,4 @@ app.post("/api/scan", async (req, res) => {
 });
 
 app.listen(3001, () => console.log("Backend attivo su http://localhost:3001"));
+
