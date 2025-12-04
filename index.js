@@ -1,153 +1,96 @@
+// Backend Node.js + Express + Ethers.js
+// ------------------------------
+// INSTALLA:
+// npm install express cors ethers axios dotenv
+// CREA .env con:
+// RPC_ETH=https://mainnet.infura.io/v3/xxx
+// RPC_BSC=https://bsc-dataseed.binance.org
+// RPC_POLYGON=https://polygon-rpc.com
+// ETHERSCAN_KEY=xxxxx
+
 import express from "express";
 import cors from "cors";
-import fetch from "node-fetch";
+import axios from "axios";
+import { ethers } from "ethers";
+import dotenv from "dotenv";
+dotenv.config();
 
 const app = express();
 app.use(cors());
+app.use(express.json());
 
-let cache = {
-  markets: null,
-  global: null,
-  btcChart: null,
-  updated: 0
+// Providers per le chain
+const providers = {
+  ethereum: new ethers.JsonRpcProvider(process.env.RPC_ETH),
+  bsc: new ethers.JsonRpcProvider(process.env.RPC_BSC),
+  polygon: new ethers.JsonRpcProvider(process.env.RPC_POLYGON),
 };
 
-// -------- SAFE FETCH --------
-async function fetchJSON(url) {
+// ----------------------
+// FUNZIONE PRINCIPALE DI SCAN
+// ----------------------
+app.post("/api/scan", async (req, res) => {
   try {
-    const res = await fetch(url, { timeout: 8000 });
+    const { network, address } = req.body;
 
-    if (!res.ok) {
-      console.log("API ERROR", url, res.status);
-      return null;
-    }
+    if (!providers[network]) return res.status(400).json({ error: "Network non supportato" });
+    if (!/^0x[0-9a-fA-F]{40}$/.test(address)) return res.status(400).json({ error: "Address non valido" });
 
-    const text = await res.text();
+    const provider = providers[network];
 
+    // 1) Ottieni bytecode
+    const bytecode = await provider.getCode(address);
+    if (bytecode === "0x") return res.status(404).json({ error: "Contract non trovato" });
+
+    // 2) Ottieni ABI da Etherscan (solo ETH nella demo)
+    let abi = [];
+    let sourceVerified = false;
     try {
-      return JSON.parse(text);
-    } catch {
-      console.log("JSON PARSE FAILED:", url, text);
-      return null;
-    }
+      if (network === "ethereum") {
+        const resp = await axios.get(
+          `https://api.etherscan.io/api?module=contract&action=getsourcecode&address=${address}&apikey=${process.env.ETHERSCAN_KEY}`
+        );
+        const data = resp.data?.result?.[0];
+        if (data && data.ABI && data.ABI !== "Contract source code not verified") {
+          abi = JSON.parse(data.ABI);
+          sourceVerified = true;
+        }
+      }
+    } catch (e) {}
 
-  } catch (e) {
-    console.log("FETCH FAILED:", url, e.message);
-    return null;
+    // 3) Controlli principali
+    const checks = [];
+
+    // CONTROLLA FUNZIONI SOSPETTE
+    const suspicious = ["mint", "setFee", "blacklist", "pause", "owner", "transferOwnership"];
+    let foundSuspicious = suspicious.filter((s) => bytecode.toLowerCase().includes(s.toLowerCase()));
+
+    checks.push({ title: "Funzioni sospette", status: foundSuspicious.length ? "bad" : "ok", description: "Ricerca nel bytecode", value: foundSuspicious.join(", ") || "None" });
+
+    // 4) SCORE
+    let score = 80;
+    if (foundSuspicious.length >= 3) score -= 25;
+    if (!sourceVerified) score -= 10;
+    if (score < 10) score = 10;
+
+    const response = {
+      address,
+      network,
+      name: "Unknown",
+      symbol: "?",
+      holders: "N/A",
+      liquidity: "N/A",
+      explorer: network === "ethereum" ? `https://etherscan.io/token/${address}` : "",
+      score,
+      bytecodeSnippet: bytecode.slice(0, 300) + "...",
+      checks,
+    };
+
+    res.json(response);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Errore interno" });
   }
-}
-
-// -------- REFRESH CACHE --------
-async function refreshCache() {
-  const now = Date.now();
-
-  if (now - cache.updated < 60_000) return;
-
-  console.log("Refreshing cache...");
-
-  const [global, markets, btcChart] = await Promise.all([
-    fetchJSON("https://api.coingecko.com/api/v3/global"),
-    fetchJSON("https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=200&page=1"),
-    fetchJSON("https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=1&interval=hourly")
-  ]);
-
-  if (global) cache.global = global;
-  if (markets) cache.markets = markets;
-  if (btcChart) cache.btcChart = btcChart;
-
-  cache.updated = now;
-
-  console.log("Cache updated OK");
-}
-
-setInterval(refreshCache, 15000);
-refreshCache();
-
-// ███████████████████████████████████
-//               ROUTES
-// ███████████████████████████████████
-
-// -------- OVERVIEW --------
-app.get("/overview", (req, res) => {
-  if (!cache.global) return res.status(200).json({ error: true });
-
-  const d = cache.global.data;
-
-  res.json({
-    market_cap: d.total_market_cap.usd,
-    volume_24h: d.total_volume.usd,
-    btc_dominance: d.market_cap_percentage.btc,
-    eth_dominance: d.market_cap_percentage.eth,
-    market_change_24h: d.market_cap_change_percentage_24h_usd,
-    top5: cache.markets ? cache.markets.slice(0, 5) : []
-  });
 });
 
-// -------- GAINERS --------
-app.get("/gainers", (req, res) => {
-  if (!cache.markets) return res.json({ error: true });
-
-  const sorted = [...cache.markets];
-
-  const gainers = sorted
-    .filter(c => c.price_change_percentage_24h != null)
-    .sort((a, b) => b.price_change_percentage_24h - a.price_change_percentage_24h)
-    .slice(0, 10);
-
-  const losers = sorted
-    .filter(c => c.price_change_percentage_24h != null)
-    .sort((a, b) => a.price_change_percentage_24h - b.price_change_percentage_24h)
-    .slice(0, 10);
-
-  res.json({ gainers, losers });
-});
-
-// -------- HEATMAP --------
-app.get("/heatmap", (req, res) => {
-  if (!cache.markets) return res.json({ error: true });
-
-  res.json(
-    cache.markets.slice(0, 50).map(c => ({
-      symbol: c.symbol,
-      change24: c.price_change_percentage_24h
-    }))
-  );
-});
-
-// -------- FEAR & GREED --------
-app.get("/feargreed", async (req, res) => {
-  const fg = await fetchJSON("https://api.alternative.me/fng/?limit=1");
-
-  if (!fg || !fg.data) {
-    return res.json({
-      value: "—",
-      value_classification: "No data"
-    });
-  }
-
-  res.json({
-    latest: fg.data[0]
-  });
-});
-
-// -------- BTC FORECAST --------
-app.get("/btcforecast", (req, res) => {
-  if (!cache.btcChart) return res.json({ error: true });
-
-  const prices = cache.btcChart.prices.map(p => p[1]);
-  const last24 = prices.slice(-24);
-
-  const last = last24[last24.length - 1];
-  const prev = last24[0];
-  const change = ((last - prev) / prev) * 100;
-
-  res.json({
-    trend: change >= 0 ? "UP" : "DOWN",
-    change,
-    confidence: 65,
-    last24
-  });
-});
-
-// SERVER
-app.listen(10000, () => console.log("API RUNNING 🔥"));
+app.listen(3001, () => console.log("Backend attivo su http://localhost:3001"));
