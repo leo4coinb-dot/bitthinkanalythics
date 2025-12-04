@@ -1,6 +1,6 @@
 import express from "express";
-import fetch from "node-fetch";
 import cors from "cors";
+import fetch from "node-fetch";
 
 const app = express();
 app.use(cors());
@@ -9,62 +9,68 @@ let cache = {
   markets: null,
   global: null,
   btcChart: null,
-  lastUpdate: 0
+  updated: 0
 };
 
-async function fetchSafe(url) {
-  const res = await fetch(url);
-  const text = await res.text();
+// -------- SAFE FETCH --------
+async function fetchJSON(url) {
   try {
-    return JSON.parse(text);
-  } catch {
-    throw new Error("JSON parse error: " + text);
+    const res = await fetch(url, { timeout: 8000 });
+
+    if (!res.ok) {
+      console.log("API ERROR", url, res.status);
+      return null;
+    }
+
+    const text = await res.text();
+
+    try {
+      return JSON.parse(text);
+    } catch {
+      console.log("JSON PARSE FAILED:", url, text);
+      return null;
+    }
+
+  } catch (e) {
+    console.log("FETCH FAILED:", url, e.message);
+    return null;
   }
 }
 
+// -------- REFRESH CACHE --------
 async function refreshCache() {
   const now = Date.now();
 
-  if (now - cache.lastUpdate < 60000) return; // 60 sec cache
+  if (now - cache.updated < 60_000) return;
 
-  try {
-    console.log("Refreshing cache...");
+  console.log("Refreshing cache...");
 
-    const global = await fetchSafe(
-      "https://api.coingecko.com/api/v3/global"
-    );
+  const [global, markets, btcChart] = await Promise.all([
+    fetchJSON("https://api.coingecko.com/api/v3/global"),
+    fetchJSON("https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=200&page=1"),
+    fetchJSON("https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=1&interval=hourly")
+  ]);
 
-    const markets = await fetchSafe(
-      "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&page=1&sparkline=false"
-    );
+  if (global) cache.global = global;
+  if (markets) cache.markets = markets;
+  if (btcChart) cache.btcChart = btcChart;
 
-    const btcChart = await fetchSafe(
-      "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=7&interval=hourly"
-    );
+  cache.updated = now;
 
-    cache = {
-      global,
-      markets,
-      btcChart,
-      lastUpdate: now
-    };
-
-    console.log("Cache updated.");
-  } catch (e) {
-    console.log("CACHE ERROR:", e.message);
-  }
+  console.log("Cache updated OK");
 }
 
-setInterval(refreshCache, 5000);
+setInterval(refreshCache, 15000);
 refreshCache();
 
-// ─────────────────────────────────────────────────────
-// ROUTES
-// ─────────────────────────────────────────────────────
+// ███████████████████████████████████
+//               ROUTES
+// ███████████████████████████████████
 
-// Overview
+// -------- OVERVIEW --------
 app.get("/overview", (req, res) => {
-  if (!cache.global) return res.json({ error: true });
+  if (!cache.global) return res.status(200).json({ error: true });
+
   const d = cache.global.data;
 
   res.json({
@@ -72,59 +78,76 @@ app.get("/overview", (req, res) => {
     volume_24h: d.total_volume.usd,
     btc_dominance: d.market_cap_percentage.btc,
     eth_dominance: d.market_cap_percentage.eth,
-    market_change_24h: d.market_cap_change_percentage_24h_usd
+    market_change_24h: d.market_cap_change_percentage_24h_usd,
+    top5: cache.markets ? cache.markets.slice(0, 5) : []
   });
 });
 
-// Gainers / Losers
+// -------- GAINERS --------
 app.get("/gainers", (req, res) => {
   if (!cache.markets) return res.json({ error: true });
 
   const sorted = [...cache.markets];
 
   const gainers = sorted
+    .filter(c => c.price_change_percentage_24h != null)
     .sort((a, b) => b.price_change_percentage_24h - a.price_change_percentage_24h)
     .slice(0, 10);
 
   const losers = sorted
+    .filter(c => c.price_change_percentage_24h != null)
     .sort((a, b) => a.price_change_percentage_24h - b.price_change_percentage_24h)
     .slice(0, 10);
 
   res.json({ gainers, losers });
 });
 
-// Heatmap
+// -------- HEATMAP --------
 app.get("/heatmap", (req, res) => {
   if (!cache.markets) return res.json({ error: true });
-  res.json(cache.markets.slice(0, 50));
+
+  res.json(
+    cache.markets.slice(0, 50).map(c => ({
+      symbol: c.symbol,
+      change24: c.price_change_percentage_24h
+    }))
+  );
 });
 
-// Fear & Greed
+// -------- FEAR & GREED --------
 app.get("/feargreed", async (req, res) => {
-  try {
-    const fg = await fetchSafe("https://api.alternative.me/fng/?limit=1");
-    res.json({
-      value: fg.data[0].value,
-      value_classification: fg.data[0].value_classification
+  const fg = await fetchJSON("https://api.alternative.me/fng/?limit=1");
+
+  if (!fg || !fg.data) {
+    return res.json({
+      value: "—",
+      value_classification: "No data"
     });
-  } catch (e) {
-    res.json({ error: true });
   }
+
+  res.json({
+    latest: fg.data[0]
+  });
 });
 
-// BTC forecast
+// -------- BTC FORECAST --------
 app.get("/btcforecast", (req, res) => {
   if (!cache.btcChart) return res.json({ error: true });
 
   const prices = cache.btcChart.prices.map(p => p[1]);
-  const last = prices[prices.length - 1];
-  const avg = prices.reduce((a, b) => a + b, 0) / prices.length;
+  const last24 = prices.slice(-24);
+
+  const last = last24[last24.length - 1];
+  const prev = last24[0];
+  const change = ((last - prev) / prev) * 100;
 
   res.json({
-    last_price: last,
-    average_price: avg,
-    forecast_price: (last * 1.02).toFixed(2)
+    trend: change >= 0 ? "UP" : "DOWN",
+    change,
+    confidence: 65,
+    last24
   });
 });
 
-app.listen(10000, () => console.log("API running on port 10000"));
+// SERVER
+app.listen(10000, () => console.log("API RUNNING 🔥"));
